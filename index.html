@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebGPU ASCII</title>
+</head>
+
+<body>
+  <canvas id="canvas"></canvas>
+  <p id="status">Requesting camera access...</p>
+  <div id="controls">
+    <label for="upload">Upload image</label>
+    <input id="upload" type="file" accept="image/*">
+    <label for="color">ASCII color</label>
+    <input id="color" type="color" value="#00ffcc" title="Choose ASCII color">
+    <label class="switch-label" for="image-color">
+      <input id="image-color" type="checkbox" checked>
+      Use source color
+    </label>
+  </div>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
