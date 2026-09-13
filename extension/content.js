@@ -1,8 +1,9 @@
 (() => {
-  if(window.top !== window)
+  if(window.__asciiVideoShader)
   {
     return;
   }
+  window.__asciiVideoShader = true;
 
   const host = document.createElement("div");
   const shadow = host.attachShadow({mode: "closed"});
@@ -16,16 +17,19 @@
   const cellLabel = document.createElement("label");
   const cellSizeInput = document.createElement("input");
   const cellSizeValue = document.createElement("span");
+  const status = document.createElement("span");
 
   style.textContent = `
     :host { position: fixed; inset: 0; z-index: 2147483646; pointer-events: none; }
     canvas { position: fixed; display: none; pointer-events: none; image-rendering: pixelated; }
-    #panel { position: fixed; right: 16px; bottom: 16px; display: flex; gap: 8px; align-items: center; padding: 8px 10px; color: white; background: rgba(0, 0, 0, .72); border-radius: 6px; font: 13px system-ui, sans-serif; pointer-events: auto; }
+    #panel { position: fixed; right: 16px; bottom: 16px; display: none; gap: 8px; align-items: center; flex-wrap: wrap; max-width: min(420px, calc(100vw - 24px)); padding: 8px 10px; color: white; background: rgba(0, 0, 0, .72); border-radius: 6px; font: 13px system-ui, sans-serif; pointer-events: auto; }
+    #panel.visible { display: flex; }
     button { border: 0; border-radius: 4px; padding: 6px 9px; color: white; background: #198754; cursor: pointer; }
     button.off { background: #555; }
     input[type=color] { width: 28px; height: 24px; padding: 0; border: 0; background: transparent; cursor: pointer; }
     input[type=range] { width: 72px; margin: 0; vertical-align: middle; cursor: pointer; }
     label { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+    #status { opacity: .85; font-size: 12px; }
   `;
 
   toggle.textContent = "ASCII on";
@@ -37,19 +41,20 @@
   imageColor.checked = true;
   label.append(imageColor, "Source color");
   cellSizeInput.type = "range";
-  cellSizeInput.min = "4";
+  cellSizeInput.min = "1";
   cellSizeInput.max = "16";
   cellSizeInput.step = "1";
   cellSizeInput.value = "8";
   cellSizeInput.title = "ASCII cell size";
   cellSizeValue.textContent = "8";
   cellLabel.append("Size", cellSizeInput, cellSizeValue);
+  status.id = "status";
   panel.id = "panel";
-  panel.append(toggle, color, label, cellLabel);
+  panel.append(toggle, color, label, cellLabel, status);
   shadow.append(style, canvas, panel);
-  document.documentElement.append(host);
 
   let enabled = false;
+  let mounted = false;
   let video;
   let device;
   let context;
@@ -60,6 +65,9 @@
   let sourceWidth = 1;
   let sourceHeight = 1;
   let animationFrame;
+  let copyFailed = false;
+  let resizeObserver;
+  let pollTimer;
 
   const shaderCode = `
     @group(0) @binding(0) var texSampler: sampler;
@@ -132,6 +140,21 @@
     }
   `;
 
+  function ensureMounted()
+  {
+    if(mounted || !document.documentElement)
+    {
+      return;
+    }
+    document.documentElement.append(host);
+    mounted = true;
+  }
+
+  function setStatus(message)
+  {
+    status.textContent = message || "";
+  }
+
   function hexToRgb(value)
   {
     return [
@@ -139,6 +162,86 @@
       parseInt(value.slice(3, 5), 16) / 255,
       parseInt(value.slice(5, 7), 16) / 255
     ];
+  }
+
+  function isVisibleVideo(candidate)
+  {
+    if(!(candidate instanceof HTMLVideoElement))
+    {
+      return false;
+    }
+
+    const rect = candidate.getBoundingClientRect();
+    const style = getComputedStyle(candidate);
+    const hiddenByUs = enabled && candidate === video;
+    return (
+      candidate.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+      candidate.videoWidth > 0 &&
+      candidate.videoHeight > 0 &&
+      rect.width >= 32 &&
+      rect.height >= 32 &&
+      style.visibility !== "hidden" &&
+      style.display !== "none" &&
+      (hiddenByUs || Number(style.opacity) !== 0)
+    );
+  }
+
+  function collectVideos(root = document, into = [])
+  {
+    if(!root || typeof root.querySelectorAll !== "function")
+    {
+      return into;
+    }
+
+    for(const candidate of root.querySelectorAll("video"))
+    {
+      into.push(candidate);
+    }
+
+    const elements = root.querySelectorAll ? root.querySelectorAll("*") : [];
+    for(const element of elements)
+    {
+      if(element.shadowRoot)
+      {
+        collectVideos(element.shadowRoot, into);
+      }
+    }
+
+    return into;
+  }
+
+  function findVideo()
+  {
+    const videos = collectVideos();
+    if(enabled && video && videos.includes(video) && video.isConnected)
+    {
+      return video;
+    }
+
+    return videos
+      .map(candidate => ({candidate, rect: candidate.getBoundingClientRect()}))
+      .filter(({candidate}) => isVisibleVideo(candidate))
+      .sort((first, second) => (
+        second.rect.width * second.rect.height - first.rect.width * first.rect.height
+      ))
+      .map(({candidate}) => candidate)[0]
+      || videos.find(candidate => candidate.videoWidth > 0 && candidate.videoHeight > 0)
+      || null;
+  }
+
+  function updatePanelVisibility()
+  {
+    ensureMounted();
+    const hasVideo = Boolean(findVideo() || (enabled && video));
+    panel.classList.toggle("visible", hasVideo || enabled);
+    if(!hasVideo && !enabled)
+    {
+      setStatus("");
+    }
+    else if(!enabled && hasVideo)
+    {
+      setStatus("");
+    }
   }
 
   function updateUniforms()
@@ -149,7 +252,9 @@
     }
 
     const rect = video.getBoundingClientRect();
-    const canvasAspect = rect.width / rect.height;
+    const width = Math.max(rect.width, 1);
+    const height = Math.max(rect.height, 1);
+    const canvasAspect = width / height;
     const imageAspect = sourceWidth / sourceHeight;
     const scale = imageAspect > canvasAspect
       ? [1, canvasAspect / imageAspect]
@@ -164,7 +269,7 @@
 
   function resize()
   {
-    if(!video || !enabled)
+    if(!video || !enabled || !context)
     {
       return;
     }
@@ -173,27 +278,65 @@
     const dpr = window.devicePixelRatio || 1;
     canvas.style.left = `${rect.left}px`;
     canvas.style.top = `${rect.top}px`;
-    canvas.style.width = `${rect.width}px`;
-    canvas.style.height = `${rect.height}px`;
+    canvas.style.width = `${Math.max(rect.width, 1)}px`;
+    canvas.style.height = `${Math.max(rect.height, 1)}px`;
     canvas.width = Math.max(1, Math.floor(rect.width * dpr));
     canvas.height = Math.max(1, Math.floor(rect.height * dpr));
     context.configure({device, format: navigator.gpu.getPreferredCanvasFormat(), alphaMode: "premultiplied"});
     updateUniforms();
   }
 
+  function observeVideo(target)
+  {
+    resizeObserver?.disconnect();
+    resizeObserver = new ResizeObserver(() => resize());
+    if(target)
+    {
+      resizeObserver.observe(target);
+    }
+  }
+
   function render()
   {
-    if(!enabled || !video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA)
+    if(!enabled)
+    {
+      return;
+    }
+
+    if(!video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA)
     {
       animationFrame = requestAnimationFrame(render);
       return;
     }
 
-    device.queue.copyExternalImageToTexture(
-      {source: video},
-      {texture: sourceTexture},
-      [sourceWidth, sourceHeight]
-    );
+    if(
+      video.videoWidth !== sourceWidth ||
+      video.videoHeight !== sourceHeight
+    )
+    {
+      setSource(video);
+    }
+
+    try
+    {
+      device.queue.copyExternalImageToTexture(
+        {source: video},
+        {texture: sourceTexture},
+        [sourceWidth, sourceHeight]
+      );
+      if(copyFailed)
+      {
+        copyFailed = false;
+        setStatus("");
+      }
+    }
+    catch(error)
+    {
+      copyFailed = true;
+      setStatus("Can't read this video (CORS)");
+      animationFrame = requestAnimationFrame(render);
+      return;
+    }
 
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginRenderPass({
@@ -239,21 +382,13 @@
       primitive: {topology: "triangle-strip"}
     });
     uniformBuffer = device.createBuffer({size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST});
-    const sampler = device.createSampler({magFilter: "nearest", minFilter: "nearest"});
     bindGroup = null;
     toggle.disabled = false;
   }
 
-  function findVideo()
-  {
-    const videos = [...document.querySelectorAll("video")];
-    return videos.find(candidate => candidate.videoWidth > 0 && candidate.videoHeight > 0)
-      || videos[0];
-  }
-
   function setSource(nextVideo)
   {
-    if(!nextVideo)
+    if(!nextVideo || !device || !pipeline)
     {
       return;
     }
@@ -274,7 +409,13 @@
       sourceWidth = video.videoWidth || 1;
       sourceHeight = video.videoHeight || 1;
       video.addEventListener("loadedmetadata", () => {
-        if(enabled)
+        if(enabled && video)
+        {
+          setSource(video);
+        }
+      });
+      video.addEventListener("resize", () => {
+        if(enabled && video)
         {
           setSource(video);
         }
@@ -294,24 +435,37 @@
         {binding: 2, resource: {buffer: uniformBuffer}}
       ]
     });
+    observeVideo(video);
     resize();
   }
 
   async function setEnabled(nextEnabled)
   {
+    if(nextEnabled && !device)
+    {
+      return;
+    }
+
     enabled = nextEnabled;
+    copyFailed = false;
     if(enabled)
     {
-      setSource(findVideo());
-      if(!video)
+      const nextVideo = findVideo();
+      if(!nextVideo)
       {
         enabled = false;
+        setStatus("No video found on this page");
+        updatePanelVisibility();
         return;
       }
+
+      setSource(nextVideo);
       video.style.opacity = "0";
       canvas.style.display = "block";
       toggle.textContent = "ASCII off";
       toggle.classList.remove("off");
+      setStatus("");
+      updatePanelVisibility();
       resize();
       cancelAnimationFrame(animationFrame);
       render();
@@ -320,10 +474,40 @@
     {
       cancelAnimationFrame(animationFrame);
       canvas.style.display = "none";
-      if(video) { video.style.opacity = ""; }
+      if(video)
+      {
+        video.style.opacity = "";
+      }
       toggle.textContent = "ASCII on";
       toggle.classList.add("off");
+      setStatus("");
+      updatePanelVisibility();
     }
+  }
+
+  function syncActiveVideo()
+  {
+    updatePanelVisibility();
+    if(!enabled)
+    {
+      return;
+    }
+
+    const nextVideo = findVideo();
+    if(!nextVideo)
+    {
+      return;
+    }
+
+    if(nextVideo !== video)
+    {
+      setSource(nextVideo);
+      video.style.opacity = "0";
+      canvas.style.display = "block";
+      copyFailed = false;
+      setStatus("");
+    }
+    resize();
   }
 
   toggle.disabled = true;
@@ -336,18 +520,36 @@
     updateUniforms();
   });
   window.addEventListener("resize", resize);
+  window.addEventListener("scroll", resize, true);
   document.addEventListener("fullscreenchange", resize);
-  new MutationObserver(() => {
-    if(enabled)
+  document.addEventListener("webkitfullscreenchange", resize);
+
+  const observer = new MutationObserver(() => syncActiveVideo());
+  const startObserver = () => {
+    const root = document.body || document.documentElement;
+    if(!root)
     {
-      const nextVideo = findVideo();
-      if(nextVideo !== video) { setSource(nextVideo); }
-      resize();
+      return;
     }
-  }).observe(document.body, {childList: true, subtree: true});
+    observer.observe(root, {childList: true, subtree: true, attributes: true, attributeFilter: ["style", "class", "src"]});
+    updatePanelVisibility();
+  };
+
+  if(document.body || document.documentElement)
+  {
+    startObserver();
+  }
+  else
+  {
+    document.addEventListener("DOMContentLoaded", startObserver, {once: true});
+  }
+
+  pollTimer = window.setInterval(syncActiveVideo, 1000);
 
   initialize().catch(() => {
     toggle.textContent = "ASCII unavailable";
     toggle.disabled = true;
+    setStatus("WebGPU failed to start");
+    updatePanelVisibility();
   });
 })();
