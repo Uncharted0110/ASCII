@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "ASCII Video Shader",
+  "version": "0.1.0",
+  "description": "Render YouTube videos as live ASCII art with WebGPU.",
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "ASCII Video Shader"
+  },
+  "permissions": []
+}
